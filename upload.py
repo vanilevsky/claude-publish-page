@@ -7,15 +7,22 @@ B2, DigitalOcean Spaces, Wasabi, …) — the endpoint/bucket/credentials come f
 config, not from this file. Run setup.py once to create the config.
 
 Usage:
-    python3 upload.py PATH [--slug SLUG]
+    python3 upload.py PATH [--slug SLUG] [--new]
 
   PATH      A single .html file, or a directory containing static assets with
             an index.html at its root.
   --slug    Optional human-readable slug for the URL. If omitted, it is derived
             from the page's <title> (or the filename), transliterated to latin.
+  --new     Force a fresh, non-overwriting URL (random suffix). Use for a
+            genuinely different document, or to snapshot the current version
+            before changing a page in place.
 
-The object key is always "<slug>-<random-suffix>[.html | /...]" so every publish
-gets a fresh, non-overwriting, hard-to-guess URL.
+Default behaviour is to UPDATE IN PLACE: the object key is the stable
+"<slug>[.html | /...]", so re-publishing the same document (same title -> same
+slug) overwrites it and the URL stays the same. Stable pages are sent with
+Cache-Control: no-cache so a revisit always revalidates and shows the latest.
+With --new the key becomes "<slug>-<random-suffix>..." for a fresh, immutable
+URL that never clobbers anything.
 """
 
 import argparse
@@ -26,6 +33,12 @@ import secrets
 import sys
 
 import _config
+
+# Stable pages must always show the latest -> revalidate every load (the store
+# sets an ETag, so unchanged content costs only a cheap 304). Fresh --new URLs
+# are unique by construction, so they can be cached hard.
+STABLE_CACHE    = "no-cache"
+IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 
 # Minimal Cyrillic -> Latin transliteration for clean slugs.
 _CYR = {
@@ -80,10 +93,20 @@ def make_client(cfg: dict):
     )
 
 
-def s3_put(client, bucket: str, key: str, path: str):
+def s3_put(client, bucket: str, key: str, path: str, cache_control: str):
     with open(path, "rb") as f:
         client.put_object(Bucket=bucket, Key=key, Body=f.read(),
-                          ContentType=content_type_for(path))
+                          ContentType=content_type_for(path),
+                          CacheControl=cache_control)
+
+
+def key_exists(client, bucket: str, key: str) -> bool:
+    from botocore.exceptions import ClientError
+    try:
+        client.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError:
+        return False
 
 
 def resolve_config() -> dict:
@@ -104,6 +127,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path", help="HTML file or directory to publish")
     ap.add_argument("--slug", default=None, help="Optional URL slug")
+    ap.add_argument("--new", action="store_true",
+                    help="Force a fresh, non-overwriting URL (random suffix). "
+                         "Use for a different document, or to snapshot the "
+                         "current version before editing a page in place.")
     args = ap.parse_args()
 
     path = os.path.abspath(args.path)
@@ -114,13 +141,18 @@ def main():
     client = make_client(cfg)
     bucket = cfg["S3_BUCKET"]
     base = cfg["S3_PUBLIC_BASE"].rstrip("/")
-    suffix = secrets.token_hex(3)  # 6 hex chars
+    cache  = IMMUTABLE_CACHE if args.new else STABLE_CACHE
+    suffix = f"-{secrets.token_hex(3)}" if args.new else ""  # 6 hex chars
 
     if os.path.isfile(path):
         slug = slugify(args.slug or title_from_html(path) or
                        os.path.splitext(os.path.basename(path))[0])
-        key = f"{slug}-{suffix}.html"
-        s3_put(client, bucket, key, path)
+        key = f"{slug}{suffix}.html"
+        if not args.new and key_exists(client, bucket, key):
+            print(f"note: updating existing page at {key} "
+                  f"(previous version overwritten; pass --new to keep it)",
+                  file=sys.stderr)
+        s3_put(client, bucket, key, path, cache)
         print(f"{base}/{key}")
         return
 
@@ -129,12 +161,16 @@ def main():
     if not os.path.isfile(index):
         sys.exit("Directory has no index.html at its root.")
     slug = slugify(args.slug or title_from_html(index) or os.path.basename(path))
-    prefix = f"{slug}-{suffix}"
+    prefix = f"{slug}{suffix}"
+    if not args.new and key_exists(client, bucket, f"{prefix}/index.html"):
+        print(f"note: updating existing site at {prefix}/ (files overwritten in "
+              f"place; files removed since last publish may linger under the "
+              f"prefix; pass --new for a fresh URL)", file=sys.stderr)
     for root, _dirs, files in os.walk(path):
         for name in files:
             fp = os.path.join(root, name)
             rel = os.path.relpath(fp, path).replace(os.sep, "/")
-            s3_put(client, bucket, f"{prefix}/{rel}", fp)
+            s3_put(client, bucket, f"{prefix}/{rel}", fp, cache)
     print(f"{base}/{prefix}/index.html")
 
 

@@ -45,23 +45,50 @@ Act on the `STATUS=` line above:
    ```
 2. **Write the page to a file**, e.g. `/tmp/<name>.html`. For a multi-file site,
    put everything in a folder with an `index.html` at its root.
-3. **Run the uploader:**
+3. **Run the uploader.** By default it **updates in place** at a stable URL:
    ```bash
    python3 ${CLAUDE_SKILL_DIR}/upload.py /tmp/<name>.html
    ```
    For a folder: `python3 ${CLAUDE_SKILL_DIR}/upload.py /tmp/<folder>`
-   Optionally force a slug: `--slug photo-app`
-4. **Return the printed URL** to the user. The script prints exactly one line —
-   the public URL — on success.
+   For a brand-new, non-overwriting URL (a genuinely different document, or a
+   snapshot of the current version): add `--new`. Force a slug with
+   `--slug photo-app`.
+4. **Return the printed URL** to the user. The script prints exactly one line on
+   stdout — the public URL — on success. When it overwrites an existing page it
+   also prints a short heads-up to stderr; that's informational, the URL is still
+   the line you return.
 
 Still create the normal inline artifact too; the published URL is an addition,
 not a replacement. Only skip publishing if the user says not to.
 
+## Updating a page — same document → same URL
+
+**Same document → same URL. Different document → new URL.** When you iterate on a
+page — fix a typo, extend it, restyle the *same* document — just re-publish it.
+Same title ⇒ same slug ⇒ same `<slug>.html`, so the existing link updates in
+place and you can hand back the URL the user already has. For a *genuinely
+different* document, give it a different title (or `--slug`) so it lands on its
+own URL.
+
+Overwriting replaces the previous content — there's no version history. To keep
+the current version as a snapshot before a big change (or when unsure whether it
+counts as "the same" document), publish with `--new` to mint a fresh,
+non-overwriting URL instead of clobbering the old one.
+
 ## URL scheme
 
-Keys are `<slug>-<random6>.html`, where the slug comes from the page `<title>`
-(Cyrillic is transliterated) or the filename. The random suffix makes every
-publish a fresh, non-overwriting, hard-to-guess URL.
+By default the key is a **stable** `<slug>.html`, where the slug comes from the
+page `<title>` (Cyrillic is transliterated) or the filename. Re-publishing the
+same document (same title ⇒ same slug) overwrites that key, so the URL stays put
+and just shows the latest — this is what lets a living document keep one link.
+Stable pages are uploaded with `Cache-Control: no-cache`, so a revisit always
+revalidates and shows the update rather than a stale copy.
+
+Pass `--new` to force a fresh, non-overwriting URL instead:
+`<slug>-<random6>.html`. Use it for a genuinely separate document, or to snapshot
+the current version before editing a page in place. These URLs are immutable and
+hard to guess. `--slug my-page` sets the slug explicitly; combine it with `--new`
+for a one-off immutable copy.
 
 ## First-time setup
 
@@ -75,6 +102,13 @@ endpoint, bucket, public base URL and keys. See `config.example.env`.
 
 - `Content-Type` is set automatically (e.g. `text/html; charset=utf-8`) so pages
   render in the browser instead of downloading.
+- **Cache caveat.** On Cloudflare `r2.dev` cache control is limited, so even with
+  `no-cache` an updated stable page can occasionally look stale. If that happens,
+  hard-refresh, or append a cache-buster like `?v=2` when sharing. A custom domain
+  with Cache Rules is the robust fix for heavily-updated pages.
+- **Updating a multi-file site** overwrites files in place but does not delete
+  files removed since the last publish — old assets may linger under the prefix
+  (usually harmless). Use `--new` for a clean slate.
 - Pages are **public** — anyone with the link can view them. Don't publish
   sensitive content.
 - `${CLAUDE_SKILL_DIR}` is the directory containing this file.
