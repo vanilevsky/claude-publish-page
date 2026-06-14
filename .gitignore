@@ -1,0 +1,10 @@
+# Never commit real config / secrets / state. They live outside the repo
+# (${CLAUDE_CONFIG_DIR:-~/.claude}/skill-data/publish-page/), but guard anyway:
+*.env
+!config.example.env
+config.env
+state.json
+
+# Python
+__pycache__/
+*.pyc
