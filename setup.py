@@ -61,8 +61,23 @@ def ensure_boto3() -> None:
         sys.exit(1)
 
 
-def wrangler_account_id() -> str:
+def wrangler_authenticated() -> bool:
+    """True only if wrangler has usable credentials (cached login or token).
+
+    Without auth, `wrangler r2 ...` runs as "non-interactive" and errors asking
+    for CLOUDFLARE_API_TOKEN, so the R2 fast-path must be skipped gracefully.
+    """
     if not shutil.which("wrangler"):
+        return False
+    if os.environ.get("CLOUDFLARE_API_TOKEN"):
+        return True
+    res = run(["wrangler", "whoami"])
+    out = (res.stdout + res.stderr).lower()
+    return res.returncode == 0 and "not authenticated" not in out
+
+
+def wrangler_account_id() -> str:
+    if not wrangler_authenticated():
         return ""
     res = run(["wrangler", "whoami"])
     ids = ACCOUNT_RE.findall(res.stdout or "")
@@ -142,13 +157,18 @@ def main() -> int:
         elif account:
             cfg["S3_ENDPOINT"] = f"https://{account}.r2.cloudflarestorage.com"
 
-        if shutil.which("wrangler") and cfg["S3_BUCKET"] and not ni:
-            print("R2 fast-path (wrangler):")
-            r2_create_bucket(cfg["S3_BUCKET"])
-            url = r2_enable_devurl(cfg["S3_BUCKET"])
-            if url:
-                print(f"  ✓ public URL: {url}")
-                cfg["S3_PUBLIC_BASE"] = url
+        if cfg["S3_BUCKET"] and not ni:
+            if wrangler_authenticated():
+                print("R2 fast-path (wrangler):")
+                r2_create_bucket(cfg["S3_BUCKET"])
+                url = r2_enable_devurl(cfg["S3_BUCKET"])
+                if url:
+                    print(f"  ✓ public URL: {url}")
+                    cfg["S3_PUBLIC_BASE"] = url
+            elif shutil.which("wrangler"):
+                print("wrangler is installed but not logged in — skipping R2 auto-create.")
+                print("  Run `wrangler login` (or set CLOUDFLARE_API_TOKEN) and re-run to")
+                print("  auto-create the bucket and enable its public r2.dev URL.")
         cfg["S3_PUBLIC_BASE"] = (
             args.public_base or cfg["S3_PUBLIC_BASE"]
             or ask("Public base URL (https://pub-….r2.dev)", non_interactive=ni))
